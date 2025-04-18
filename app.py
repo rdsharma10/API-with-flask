@@ -1,110 +1,101 @@
 from flask import Flask, request, jsonify
-from itertools import permutations
+import heapq
 
 app = Flask(__name__)
 
-# Product info: product -> (center, weight)
-product_info = {
-    'A': ('C1', 3),
-    'B': ('C1', 2),
-    'C': ('C1', 8),
-    'D': ('C2', 12),
-    'E': ('C2', 25),
-    'F': ('C2', 15),
-    'G': ('C2', 0.5),
-    'H': ('C3', 1),
-    'I': ('C3', 2),
+# Warehouse stock data
+center_stock = {
+    "C1": {"A": 3, "B": 2, "C": 8},
+    "C2": {"D": 12, "E": 25, "F": 15},
+    "C3": {"G": 0.5, "H": 1, "I": 2}
 }
 
-# Distances between centers and L1
-distances = {
-    ('C1', 'L1'): 3,
-    ('C2', 'L1'): 2.5,
-    ('C3', 'L1'): 2,
-    ('C1', 'C2'): 4,
-    ('C1', 'C3'): 3,
-    ('C2', 'C3'): 3,
+# Graph distances (unit distances)
+graph = {
+    "C1": {"C2": 4, "C3": 3, "L1": 2},
+    "C2": {"C1": 4, "C3": 2.5, "L1": 3},
+    "C3": {"C1": 3, "C2": 2.5, "L1": 3},
+    "L1": {"C1": 2, "C2": 3, "C3": 3}
 }
-# Add reverse distances
-for (a, b), d in list(distances.items()):
-    distances[(b, a)] = d
 
-# Cost per unit distance function
-def cost_per_distance(weight):
+# Weight cost rules
+def cost_per_unit(weight):
     if weight <= 5:
         return 10
-    extra = weight - 5
-    extra_cost_units = (extra + 4.9999) // 5  # Round up
-    return 10 + 8 * int(extra_cost_units)
+    else:
+        return 10 * 5 + ((weight - 5 + 4) // 5) * 8
 
-# Get all centers involved in the current order
-def get_centers_from_order(order):
-    centers = set()
+# Find shortest path using Dijkstra’s algorithm
+def dijkstra(start, locations):
+    heap = [(0, start, [])]
+    visited = set()
+
+    while heap:
+        cost, node, path = heapq.heappop(heap)
+        if node in visited:
+            continue
+        visited.add(node)
+        path = path + [node]
+        if all(loc in path for loc in locations + ['L1']):
+            return path
+        for neighbor, weight in graph.get(node, {}).items():
+            if neighbor not in visited:
+                heapq.heappush(heap, (cost + weight, neighbor, path))
+
+    return []
+
+# Main calculation
+def calculate_cost(start_center, order):
+    total_weight = 0
+    needed_centers = set()
+
     for product, qty in order.items():
-        if qty > 0:
-            center, _ = product_info[product]
-            centers.add(center)
-    return list(centers)
+        found = False
+        for center, stock in center_stock.items():
+            if product in stock:
+                total_weight += stock[product] * qty
+                needed_centers.add(center)
+                found = True
+                break
+        if not found:
+            return float('inf')  # product not found
 
-# Get total weight to deliver from a center
-def get_weight_from_center(center, order):
-    weight = 0
-    for product, qty in order.items():
-        if qty > 0 and product_info[product][0] == center:
-            weight += product_info[product][1] * qty
-    return weight
+    path = dijkstra(start_center, list(needed_centers))
+    if not path:
+        return float('inf')
 
-# Calculate total delivery cost for a route
-def calculate_route_cost(route, order):
-    total_cost = 0
-    carried_items = []
+    # Calculate total distance
+    total_distance = 0
+    for i in range(len(path) - 1):
+        total_distance += graph[path[i]][path[i+1]]
 
-    for i in range(len(route) - 1):
-        current = route[i]
-        nxt = route[i + 1]
-
-        if current.startswith('C'):
-            # Pick up items from this center
-            for product, qty in order.items():
-                if qty > 0 and product_info[product][0] == current:
-                    carried_items += [product_info[product][1]] * qty
-
-        if nxt == 'L1':
-            weight = sum(carried_items)
-            cost = cost_per_distance(weight)
-            total_cost += distances[(current, nxt)] * cost
-            carried_items = []  # Drop all at L1
-        else:
-            # Move without dropping
-            weight = sum(carried_items)
-            cost = cost_per_distance(weight)
-            total_cost += distances[(current, nxt)] * cost
-
-    return total_cost
+    cost = total_distance * cost_per_unit(total_weight)
+    return cost
 
 @app.route('/calculate', methods=['POST'])
-def calculate_min_cost():
-    order = request.get_json()
+def calculate_minimum_cost():
+    try:
+        order = request.get_json()
 
-    centers_needed = get_centers_from_order(order)
-    possible_routes = []
+        if not order:
+            return jsonify({"error": "Invalid or empty request body"}), 400
 
-    for start_center in centers_needed:
-        # Add L1 once after each center pickup
-        rest = [c for c in centers_needed if c != start_center]
-        for perm in permutations(rest):
-            route = [start_center]
-            for c in perm:
-                route += ['L1', c]
-            route.append('L1')
-            possible_routes.append(route)
+        min_cost = float('inf')
+        best_center = None
 
-    min_cost = float('inf')
-    for route in possible_routes:
-        cost = calculate_route_cost(route, order)
-        min_cost = min(min_cost, cost)
+        for center in center_stock:
+            cost = calculate_cost(center, order)
+            if cost < min_cost:
+                min_cost = cost
+                best_center = center
 
-    return jsonify({'minimum_cost': round(min_cost)})
+        return jsonify({
+            "minimum_cost": min_cost,
+            "starting_center": best_center
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(host="0.0.0.0", port=5000)
